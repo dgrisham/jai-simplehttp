@@ -174,7 +174,7 @@ http_accept_client :: (server: *HTTPServer) -> *HTTPRequest {
 
     client.socket, client.address = accept(server.socket);
     if client.socket < 0 {
-        return null; 
+        return null;
     }
     request := New(HTTPRequest);
     request.client = client;
@@ -191,7 +191,7 @@ http_handle_request :: (request: *HTTPRequest) -> HTTPServerError {
 
     // Make sure we always clean up after ourselves.
     defer close_and_reset(*request.client.socket);
-    defer free_request(request);
+    defer reset_request(request);
 
     while true {
         n := recv(request.client.socket, xx *buf, BUFFER_MAX, 0);
@@ -268,7 +268,7 @@ http_handle_request :: (request: *HTTPRequest) -> HTTPServerError {
             if result.error {
                 middleware_okay = false;
                 http_send_response(request, result.response);
-                free_response(result.response);
+                reset_response(result.response);
 
                 // Middleware interupting the request is the middleware's 
                 // problem, but does not actually count as a server error.
@@ -282,7 +282,6 @@ http_handle_request :: (request: *HTTPRequest) -> HTTPServerError {
         for route:request.server.routes {
             #if USE_REGEX {
                 matched, captures := match(request.uri, route.regex);
-                defer array_free(captures);
                 if matched && (request.verb & route.accept_verbs) {
                     request.url_captures = captures;
                     response = route.handler(request);
@@ -312,7 +311,7 @@ http_handle_request :: (request: *HTTPRequest) -> HTTPServerError {
             if result.error {
                 middleware_okay = false;
                 http_send_response(request, result.response);
-                free_response(result.response);
+                reset_response(result.response);
 
                 // Middleware interupting the request is the middleware's 
                 // problem, but does not actually count as a server error.
@@ -324,7 +323,7 @@ http_handle_request :: (request: *HTTPRequest) -> HTTPServerError {
     // All done. Now send the response and log it.
     http_send_response(request, response);
     #if USE_LOGGING log("[%] [%] % %\n", to_string(request.client.address), response.status, request.verb, request.uri);
-    free_response(response);
+    reset_response(response);
 
     return .NoProblem;
 }
@@ -334,30 +333,14 @@ dispatch_routes :: (request: *HTTPRequest, response: *HTTPResponse) {
 
 }
 
-free_response :: (response: HTTPResponse) {
-    if response.body != "" {
-        free(response.body);
-    }
-    
-    for response.headers {
-        free(it.key);
-        free(it.value);
-    }
-    
+reset_response :: (response: HTTPResponse) {
     array_reset(*response.headers);
 }
 
-free_request :: (request: *HTTPRequest) {
-    free(request.uri);
-    free(request.protocol);
-    for request.headers {
-        free(it.key);
-        free(it.value);
-    }
+reset_request :: (request: *HTTPRequest) {
     array_reset(*request.headers);
     table_reset(*request.url_params);
     deinit(*request.url_params);
-    free(request);
 }
 
 
@@ -388,21 +371,21 @@ http_server_listen :: (server: *HTTPServer) -> HTTPServerError {
         err := get_last_socket_error();
         #if OS == .WINDOWS {
             if err == {
-                case WSAEACCES; return .Access;
+                case WSAEACCES;     return .Access;
                 case WSAEADDRINUSE; return .AddressInUse;
-                case; return .Socket;
+                case;               return .Socket;
             }
         } else {
             if err == {
-                case EACCES; return .Access;
+                case EACCES;     return .Access;
                 case EADDRINUSE; return .AddressInUse;
-                case; return .Socket;
+                case;            return .Socket;
             }
         }
     }
     if listen(server.socket, 5) < 0 return .Socket;
 
-    return .NoProblem;  
+    return .NoProblem;
 }
 
 
@@ -412,9 +395,13 @@ http_server_run_single_threaded :: (server: *HTTPServer) -> HTTPServerError {
     defer close(server.socket);
 
     while !server.shutdown {
+        push_allocator(temp);
+
         request := http_accept_client(server);
         if request == null continue;
         http_handle_request(request);
+
+        reset_temporary_storage();
     }
 
     return .NoProblem;
